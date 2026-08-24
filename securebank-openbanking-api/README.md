@@ -94,6 +94,9 @@ p.write_text(
 PY
 
 mkdir -p data
+
+export JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
