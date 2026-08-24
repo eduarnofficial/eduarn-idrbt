@@ -217,7 +217,7 @@ Or locally:
 ```bash
 source .venv/bin/activate
 export JWT_SECRET=local-test-secret
-pytest -q
+PYTHONPATH=. pytest -q
 ```
 
 ## 8. Semgrep
