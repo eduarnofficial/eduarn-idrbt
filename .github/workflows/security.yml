@@ -1,5 +1,8 @@
 name: SecureBank Security Pipeline
 
+on:
+  workflow_dispatch:
+
 #################
 #on:
 #  push:
