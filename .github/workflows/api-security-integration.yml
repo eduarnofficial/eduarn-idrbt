@@ -1,1 +1,827 @@
 
+name: SecureBank API Security & Integration Testing
+
+# ============================================================
+# WORKFLOW PURPOSE
+# ============================================================
+#
+# This pipeline performs:
+#
+# 1. REST API integration testing
+# 2. Authentication testing
+# 3. Authorization testing
+# 4. BOLA / IDOR security testing
+# 5. Input validation testing
+# 6. DAST security testing
+# 7. OWASP ZAP scanning
+#
+# DAST = Dynamic Application Security Testing
+#       Security testing against a RUNNING application.
+#
+# OWASP = Open Worldwide Application Security Project
+#         Community/project focused on application security.
+#
+# ZAP = Zed Attack Proxy
+#       OWASP's open-source web application security scanner.
+#
+# BOLA = Broken Object Level Authorization
+#        API authorization vulnerability where a user can
+#        access another user's object/resource.
+#
+# IDOR = Insecure Direct Object Reference
+#        Common term for vulnerabilities involving direct
+#        access to objects without proper authorization.
+#
+# JWT = JSON Web Token
+#       Used by this application for authentication.
+#
+# REST API = Representational State Transfer Application
+#            Programming Interface.
+#
+# ============================================================
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+# GitHub permissions required for:
+# - Reading repository contents
+# - Uploading SARIF/security results if required later
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+
+  # ============================================================
+  # REST API INTEGRATION TEST JOB
+  # ============================================================
+
+  api-test:
+
+    name: REST API Integration Tests
+
+    runs-on: [self-hosted, linux, x64]
+
+    defaults:
+      run:
+        working-directory: securebank-openbanking-api
+
+    steps:
+
+      # ========================================================
+      # 1. CHECKOUT SOURCE CODE
+      # ========================================================
+      #
+      # GitHub Actions checks out the repository so the runner
+      # can build and test the SecureBank application.
+      #
+      # ========================================================
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+
+      # ========================================================
+      # 2. SETUP PYTHON
+      # ========================================================
+      #
+      # Python runtime used by the FastAPI application.
+      #
+      # ========================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+
+      # ========================================================
+      # 3. INSTALL APPLICATION DEPENDENCIES
+      # ========================================================
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+
+      # ========================================================
+      # 4. PREPARE TEST DATABASE
+      # ========================================================
+      #
+      # SecureBank uses SQLite for this training/demo environment.
+      #
+      # ========================================================
+
+      - name: Prepare database
+        env:
+          JWT_SECRET: ci-demo-secret-change-me
+          DATABASE_URL: sqlite:///./data/securebank.db
+
+        run: |
+          mkdir -p data
+          rm -f data/securebank.db
+
+          python -c "from app.database import init_db; init_db()"
+
+          echo "Database:"
+          ls -lh data/securebank.db
+
+          echo "Tables:"
+
+          python -c "import sqlite3; db=sqlite3.connect('data/securebank.db'); print(db.execute(\"SELECT name FROM sqlite_master WHERE type='table'\").fetchall()); db.close()"
+
+
+      # ========================================================
+      # 5. START FASTAPI REST API
+      # ========================================================
+      #
+      # FastAPI application is started locally on the runner.
+      #
+      # This is important because DAST requires a RUNNING
+      # application.
+      #
+      # ========================================================
+
+      - name: Start SecureBank API
+        env:
+          JWT_SECRET: ci-demo-secret-change-me
+          DATABASE_URL: sqlite:///./data/securebank.db
+
+        run: |
+
+          nohup uvicorn app.main:app \
+            --host 0.0.0.0 \
+            --port 8000 \
+            > api.log 2>&1 &
+
+          echo $! > api.pid
+
+          echo "Waiting for SecureBank REST API..."
+
+          for i in {1..30}; do
+
+            if curl -fsS http://127.0.0.1:8000/health; then
+
+              echo
+              echo "SecureBank API is UP"
+              break
+
+            fi
+
+            echo "Waiting... attempt $i"
+
+            sleep 2
+
+          done
+
+          curl -fsS http://127.0.0.1:8000/health
+
+
+      # ========================================================
+      # 6. REST API HEALTH TEST
+      # ========================================================
+      #
+      # API = Application Programming Interface
+      #
+      # Verifies that the REST API is running and responding.
+      #
+      # Expected:
+      #
+      # GET /health
+      # HTTP 200
+      #
+      # ========================================================
+
+      - name: Test REST API health
+        run: |
+
+          echo "Testing REST API /health endpoint"
+
+          HTTP_CODE=$(curl \
+            -s \
+            -o health-response.json \
+            -w "%{http_code}" \
+            http://127.0.0.1:8000/health)
+
+          echo "HTTP status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+
+            echo "ERROR: REST API health check failed"
+
+            cat health-response.json
+
+            exit 1
+
+          fi
+
+          cat health-response.json
+
+          echo
+          echo "REST API health test PASSED"
+
+
+      # ========================================================
+      # 7. AUTHENTICATION TEST
+      # ========================================================
+      #
+      # Authentication = WHO are you?
+      #
+      # SecureBank uses JWT:
+      #
+      # JWT = JSON Web Token
+      #
+      # The test verifies that valid credentials produce
+      # an authentication token.
+      #
+      # ========================================================
+
+      - name: Test JWT authentication
+        env:
+          API_URL: http://127.0.0.1:8000
+
+        run: |
+
+          echo "Testing JWT authentication"
+
+          curl -fsS \
+            -X POST "$API_URL/auth/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "username=alice&password=password123" \
+            -o token-response.json
+
+          cat token-response.json
+
+          python - <<'PY'
+
+          import json
+
+          with open("token-response.json") as f:
+              data = json.load(f)
+
+          token = data.get("access_token")
+
+          if not token:
+              raise SystemExit(
+                  "ERROR: JWT access_token was not returned"
+              )
+
+          print("JWT authentication successful")
+          print("Access token received")
+
+          PY
+
+
+      # ========================================================
+      # 8. PREPARE JWT TOKEN
+      # ========================================================
+      #
+      # The JWT token will be used for subsequent authenticated
+      # REST API calls.
+      #
+      # ========================================================
+
+      - name: Prepare JWT authentication token
+        run: |
+
+          TOKEN=$(python -c \
+            "import json; print(json.load(open('token-response.json'))['access_token'])")
+
+          if [ -z "$TOKEN" ]; then
+
+            echo "ERROR: JWT token is empty"
+
+            exit 1
+
+          fi
+
+          echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+          echo "JWT token prepared"
+
+
+      # ========================================================
+      # 9. AUTHORIZATION TEST
+      # ========================================================
+      #
+      # Authorization = WHAT are you allowed to access?
+      #
+      # Alice should be able to access her OWN account.
+      #
+      # Expected:
+      #
+      # Alice -> Account 1
+      # HTTP 200
+      #
+      # ========================================================
+
+      - name: Test account authorization
+        run: |
+
+          echo "Testing Alice's own account"
+
+          HTTP_CODE=$(curl \
+            -s \
+            -o accounts-response.json \
+            -w "%{http_code}" \
+            http://127.0.0.1:8000/api/v1/accounts \
+            -H "Authorization: Bearer $TOKEN")
+
+          echo "HTTP status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+
+            echo "ERROR: Account authorization failed"
+
+            cat accounts-response.json
+
+            exit 1
+
+          fi
+
+          cat accounts-response.json
+
+          echo
+          echo "Account authorization PASSED"
+
+
+      # ========================================================
+      # 10. OWN ACCOUNT ACCESS TEST
+      # ========================================================
+      #
+      # Verifies that Alice can access her own account object.
+      #
+      # ========================================================
+
+      - name: Test Alice own account
+        run: |
+
+          echo "Testing Alice -> Account 1"
+
+          HTTP_CODE=$(curl \
+            -s \
+            -o alice-account-response.json \
+            -w "%{http_code}" \
+            http://127.0.0.1:8000/api/v1/accounts/1 \
+            -H "Authorization: Bearer $TOKEN")
+
+          echo "HTTP status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+
+            echo "ERROR: Alice cannot access her own account"
+
+            cat alice-account-response.json
+
+            exit 1
+
+          fi
+
+          cat alice-account-response.json
+
+          echo
+          echo "Own-account authorization PASSED"
+
+
+      # ========================================================
+      # 11. BOLA / IDOR SECURITY TEST
+      # ========================================================
+      #
+      # BOLA = Broken Object Level Authorization
+      #
+      # IDOR = Insecure Direct Object Reference
+      #
+      # This is an important API security test.
+      #
+      # Scenario:
+      #
+      # Alice is authenticated.
+      #
+      # Alice attempts:
+      #
+      # GET /api/v1/accounts/2
+      #
+      # Account 2 belongs to another user (Bob).
+      #
+      # Alice MUST NOT receive Bob's account information.
+      #
+      # Expected:
+      #
+      # HTTP 403 Forbidden
+      #
+      # If the API returns HTTP 200:
+      #
+      # SECURITY TEST FAILS
+      #
+      # ========================================================
+
+      - name: Test BOLA / IDOR protection
+        run: |
+
+          echo "=========================================="
+
+          echo "BOLA / IDOR SECURITY TEST"
+
+          echo "=========================================="
+
+          echo "BOLA = Broken Object Level Authorization"
+
+          echo "IDOR = Insecure Direct Object Reference"
+
+          echo
+
+          echo "Scenario:"
+          echo "Alice attempts to access Bob's account."
+
+          echo
+
+          echo "Alice -> Account 2"
+
+          HTTP_CODE=$(curl \
+            -s \
+            -o bola-response.json \
+            -w "%{http_code}" \
+            http://127.0.0.1:8000/api/v1/accounts/2 \
+            -H "Authorization: Bearer $TOKEN")
+
+          echo
+
+          echo "HTTP status: $HTTP_CODE"
+
+          cat bola-response.json
+
+          if [ "$HTTP_CODE" != "403" ]; then
+
+            echo
+            echo "=========================================="
+
+            echo "SECURITY TEST FAILED"
+
+            echo "=========================================="
+
+            echo "Expected HTTP 403 Forbidden"
+
+            echo "Received HTTP $HTTP_CODE"
+
+            echo
+            echo "Possible BOLA / IDOR vulnerability!"
+
+            exit 1
+
+          fi
+
+          echo
+          echo "=========================================="
+
+          echo "BOLA / IDOR PROTECTION PASSED"
+
+          echo "=========================================="
+
+          echo "Alice cannot access Bob's account."
+
+
+      # ========================================================
+      # 12. VALID TRANSACTION TEST
+      # ========================================================
+      #
+      # Tests normal/valid transaction processing.
+      #
+      # ========================================================
+
+      - name: Test valid transaction
+        run: |
+
+          echo "Testing valid transaction"
+
+          HTTP_CODE=$(curl \
+            -s \
+            -o transaction-response.json \
+            -w "%{http_code}" \
+            -X POST \
+            http://127.0.0.1:8000/api/v1/transactions \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"to_account":2,"amount":500,"description":"CI test payment"}')
+
+          echo "HTTP status: $HTTP_CODE"
+
+          cat transaction-response.json
+
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+
+            echo "ERROR: Valid transaction was rejected"
+
+            exit 1
+
+          fi
+
+          echo
+          echo "Valid transaction test PASSED"
+
+
+      # ========================================================
+      # 13. INPUT VALIDATION TEST - NEGATIVE AMOUNT
+      # ========================================================
+      #
+      # Input Validation prevents invalid or malicious data
+      # from being accepted by the API.
+      #
+      # Negative transaction amounts must be rejected.
+      #
+      # Expected:
+      #
+      # HTTP 422 Unprocessable Entity
+      #
+      # ========================================================
+
+      - name: Test negative amount validation
+        run: |
+
+          echo "Testing negative transaction amount"
+
+          HTTP_CODE=$(curl \
+            -s \
+            -o invalid-negative-response.json \
+            -w "%{http_code}" \
+            -X POST \
+            http://127.0.0.1:8000/api/v1/transactions \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"to_account":2,"amount":-500,"description":"Invalid transaction"}')
+
+          echo "HTTP status: $HTTP_CODE"
+
+          cat invalid-negative-response.json
+
+          if [ "$HTTP_CODE" != "422" ]; then
+
+            echo "VALIDATION TEST FAILED"
+
+            echo "Expected HTTP 422"
+
+            echo "Received HTTP $HTTP_CODE"
+
+            exit 1
+
+          fi
+
+          echo
+          echo "Negative amount validation PASSED"
+
+
+      # ========================================================
+      # 14. INPUT VALIDATION TEST - MAXIMUM AMOUNT
+      # ========================================================
+      #
+      # Tests maximum transaction amount validation.
+      #
+      # Expected:
+      #
+      # HTTP 422 Unprocessable Entity
+      #
+      # ========================================================
+
+      - name: Test maximum transaction amount validation
+        run: |
+
+          echo "Testing excessive transaction amount"
+
+          HTTP_CODE=$(curl \
+            -s \
+            -o invalid-large-response.json \
+            -w "%{http_code}" \
+            -X POST \
+            http://127.0.0.1:8000/api/v1/transactions \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"to_account":2,"amount":999999999,"description":"Invalid large transaction"}')
+
+          echo "HTTP status: $HTTP_CODE"
+
+          cat invalid-large-response.json
+
+          if [ "$HTTP_CODE" != "422" ]; then
+
+            echo "VALIDATION TEST FAILED"
+
+            echo "Expected HTTP 422"
+
+            echo "Received HTTP $HTTP_CODE"
+
+            exit 1
+
+          fi
+
+          echo
+          echo "Maximum amount validation PASSED"
+
+
+      # ========================================================
+      # 15. OWASP ZAP DAST SECURITY SCAN
+      # ========================================================
+      #
+      # DAST = Dynamic Application Security Testing
+      #
+      # DAST tests the APPLICATION WHILE IT IS RUNNING.
+      #
+      # OWASP = Open Worldwide Application Security Project
+      #
+      # ZAP = Zed Attack Proxy
+      #
+      # OWASP ZAP is an open-source web application security
+      # scanner.
+      #
+      # In this step:
+      #
+      # GitHub Runner
+      #       |
+      #       v
+      # FastAPI REST API :8000
+      #       ^
+      #       |
+      # OWASP ZAP
+      #
+      # ZAP scans the running REST API for common web/API
+      # security weaknesses.
+      #
+      # This is different from:
+      #
+      # Semgrep = SAST / Static Application Security Testing
+      #
+      # Trivy = Vulnerability scanning
+      #
+      # Checkov = Infrastructure-as-Code security scanning
+      #
+      # ========================================================
+
+      - name: OWASP ZAP DAST scan
+        continue-on-error: true
+
+        run: |
+
+          echo "=========================================="
+
+          echo "OWASP ZAP DAST SECURITY SCAN"
+
+          echo "=========================================="
+
+          echo "DAST = Dynamic Application Security Testing"
+
+          echo "OWASP = Open Worldwide Application Security Project"
+
+          echo "ZAP = Zed Attack Proxy"
+
+          echo
+
+          mkdir -p zap-report
+
+          docker run --rm \
+            --network host \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t http://127.0.0.1:8000 \
+            -r zap-report.html \
+            -J zap-report.json \
+            || true
+
+          echo
+
+          echo "OWASP ZAP DAST scan completed."
+
+
+      # ========================================================
+      # 16. UPLOAD OWASP ZAP DAST REPORT
+      # ========================================================
+      #
+      # The HTML report is easy for humans to read.
+      #
+      # The JSON report is useful for automation/integration.
+      #
+      # ========================================================
+
+      - name: Upload OWASP ZAP DAST report
+        if: always()
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: owasp-zap-dast-report
+
+          path: securebank-openbanking-api/zap-report/
+
+          if-no-files-found: warn
+
+
+      # ========================================================
+      # 17. UPLOAD API TEST EVIDENCE
+      # ========================================================
+      #
+      # Saves JSON responses and API logs for troubleshooting
+      # and demonstration purposes.
+      #
+      # ========================================================
+
+      - name: Upload REST API test evidence
+        if: always()
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: securebank-api-test-evidence
+
+          path: |
+            securebank-openbanking-api/*-response.json
+            securebank-openbanking-api/api.log
+
+          if-no-files-found: warn
+
+
+      # ========================================================
+      # 18. FINAL TEST SUMMARY
+      # ========================================================
+
+      - name: API security test summary
+        if: always()
+
+        run: |
+
+          echo "=========================================="
+
+          echo "SECUREBANK REST API SECURITY TEST SUMMARY"
+
+          echo "=========================================="
+
+          echo
+
+          echo "1. REST API Health"
+          echo "   GET /health"
+
+          echo
+
+          echo "2. Authentication"
+          echo "   JWT = JSON Web Token"
+
+          echo
+
+          echo "3. Authorization"
+          echo "   User -> Own Account"
+
+          echo
+
+          echo "4. BOLA / IDOR"
+          echo "   Broken Object Level Authorization"
+          echo "   Insecure Direct Object Reference"
+
+          echo
+
+          echo "5. Input Validation"
+          echo "   Negative amount"
+          echo "   Excessive amount"
+
+          echo
+
+          echo "6. DAST"
+          echo "   Dynamic Application Security Testing"
+
+          echo
+
+          echo "7. OWASP ZAP"
+          echo "   Zed Attack Proxy"
+
+          echo
+
+          echo "Reports:"
+          echo "GitHub Actions -> Artifacts"
+
+          echo
+
+          echo "=========================================="
+
+
+      # ========================================================
+      # 19. STOP FASTAPI APPLICATION
+      # ========================================================
+
+      - name: Stop SecureBank API
+        if: always()
+
+        run: |
+
+          if [ -f api.pid ]; then
+
+            kill "$(cat api.pid)" || true
+
+          fi
+
+          echo "SecureBank REST API stopped"
