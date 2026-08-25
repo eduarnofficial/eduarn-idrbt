@@ -43,13 +43,25 @@ jobs:
       # 4. Unit tests
       # --------------------------------------------------
       - name: Prepare test environment
+        env:
+          JWT_SECRET: ci-demo-secret-change-me
+          DATABASE_URL: sqlite:////${{ github.workspace }}/securebank-openbanking-api/data/securebank.db
         run: |
           mkdir -p data
+          rm -f data/securebank.db
+
+          python -c "from app.database import init_db; init_db()"
+
+          echo "Database created:"
+          ls -lh data/securebank.db
+
+          echo "Database tables:"
+          python -c "import sqlite3; db=sqlite3.connect('data/securebank.db'); print(db.execute(\"SELECT name FROM sqlite_master WHERE type='table'\").fetchall()); db.close()"
 
       - name: Unit tests
         env:
           JWT_SECRET: ci-demo-secret-change-me
-          DATABASE_URL: sqlite:///./data/securebank.db
+          DATABASE_URL: sqlite:////${{ github.workspace }}/securebank-openbanking-api/data/securebank.db
         run: |
           PYTHONPATH=. pytest -q
 
