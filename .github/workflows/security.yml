@@ -1,1 +1,63 @@
 
+name: SecureBank Security Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  security:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Unit tests
+        env:
+          JWT_SECRET: ci-demo-secret-change-me
+        run: |
+          PYTHONPATH=. pytest -q
+
+      - name: Semgrep SAST
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: auto
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Checkov IaC scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          quiet: true
+
+      - name: Docker build
+        run: |
+          docker build -t securebank:ci .
+
+      - name: Trivy container scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: securebank:ci
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
