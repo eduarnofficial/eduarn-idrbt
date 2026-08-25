@@ -42,9 +42,14 @@ jobs:
       # --------------------------------------------------
       # 4. Unit tests
       # --------------------------------------------------
+      - name: Prepare test environment
+        run: |
+          mkdir -p data
+
       - name: Unit tests
         env:
           JWT_SECRET: ci-demo-secret-change-me
+          DATABASE_URL: sqlite:///./data/securebank.db
         run: |
           PYTHONPATH=. pytest -q
 
