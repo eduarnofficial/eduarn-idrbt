@@ -1,12 +1,14 @@
 name: SecureBank Security Pipeline
 
-on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+#################
+#on:
+#  push:
+#    branches:
+#      - main
+#  pull_request:
+#    branches:
+#      - main
+##########################
 
 # Required for GitHub Code Scanning SARIF uploads
 permissions:
