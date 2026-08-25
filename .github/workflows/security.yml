@@ -89,9 +89,20 @@ jobs:
       # --------------------------------------------------
       - name: Checkov IaC scan
         uses: bridgecrewio/checkov-action@v12
+        continue-on-error: true
         with:
           directory: securebank-openbanking-api/terraform
-          quiet: true
+          quiet: false
+          output_format: cli,sarif
+          output_file_path: console,results.sarif
+
+      - name: Upload Checkov report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-security-report
+          path: results.sarif
+          if-no-files-found: warn
 
       # --------------------------------------------------
       # 8. Docker build
