@@ -633,71 +633,70 @@ jobs:
       #
       # DAST = Dynamic Application Security Testing
       #
-      # DAST tests the APPLICATION WHILE IT IS RUNNING.
-      #
       # OWASP = Open Worldwide Application Security Project
       #
       # ZAP = Zed Attack Proxy
       #
-      # OWASP ZAP is an open-source web application security
-      # scanner.
+      # OWASP ZAP scans the RUNNING REST API for security issues.
       #
-      # In this step:
-      #
-      # GitHub Runner
-      #       |
-      #       v
-      # FastAPI REST API :8000
-      #       ^
-      #       |
-      # OWASP ZAP
-      #
-      # ZAP scans the running REST API for common web/API
-      # security weaknesses.
-      #
-      # This is different from:
-      #
-      # Semgrep = SAST / Static Application Security Testing
-      #
-      # Trivy = Vulnerability scanning
-      #
-      # Checkov = Infrastructure-as-Code security scanning
+      # The /zap/wrk directory is mounted to the local
+      # zap-report directory so ZAP can create HTML/JSON reports.
       #
       # ========================================================
-
+      
       - name: OWASP ZAP DAST scan
         continue-on-error: true
-
         run: |
-
+      
           echo "=========================================="
-
           echo "OWASP ZAP DAST SECURITY SCAN"
-
           echo "=========================================="
-
+      
           echo "DAST = Dynamic Application Security Testing"
-
           echo "OWASP = Open Worldwide Application Security Project"
-
           echo "ZAP = Zed Attack Proxy"
-
           echo
-
+      
+          # Create directory for ZAP reports
           mkdir -p zap-report
-
+      
+          # Run OWASP ZAP against the running SecureBank API.
+          #
+          # IMPORTANT:
+          # -v "$PWD/zap-report:/zap/wrk:rw"
+          #
+          # mounts the GitHub runner's zap-report directory
+          # into the ZAP container as /zap/wrk.
+          #
+          # Therefore:
+          #
+          # /zap/wrk/zap-report.html
+          #        ↓
+          # runner/zap-report/zap-report.html
+          #
+          # /zap/wrk/zap-report.json
+          #        ↓
+          # runner/zap-report/zap-report.json
+      
           docker run --rm \
             --network host \
-            -t ghcr.io/zaproxy/zaproxy:stable \
+            -v "$PWD/zap-report:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
             -t http://127.0.0.1:8000 \
             -r zap-report.html \
             -J zap-report.json \
-            || true
-
+            -I
+      
           echo
-
-          echo "OWASP ZAP DAST scan completed."
+          echo "=========================================="
+          echo "OWASP ZAP DAST SCAN COMPLETED"
+          echo "=========================================="
+      
+          echo
+          echo "Generated reports:"
+      
+          ls -lh zap-report/
 
 
       # ========================================================
